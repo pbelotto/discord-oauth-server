@@ -14,11 +14,8 @@ const SUCCESS_URL = process.env.SUCCESS_URL;
 const ERROR_URL = '/erro';
 
 // Monta a redirect URI dinamicamente garantindo https://
-const getRedirectUri = (req) => {
-  const host = process.env.RAILWAY_PUBLIC_DOMAIN
-    || process.env.DISCORD_REDIRECT_URI?.replace('/callback', '')?.replace('https://', '')
-    || req.get('host');
-  return `https://${host.replace('https://', '')}/callback`;
+const getRedirectUri = () => {
+  return process.env.DISCORD_REDIRECT_URI;
 };
 
 // Rota principal
