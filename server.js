@@ -2,36 +2,47 @@ const express = require('express');
 const axios = require('axios');
 const app = express();
 
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
-const REDIRECT_URI = process.env.DISCORD_REDIRECT_URI; // ex: https://discord.seusite.com.br/callback
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
-const N8N_SHEETS_URL = process.env.N8N_SHEETS_URL; // URL do webhook N8N que busca no Sheets
-const SUCCESS_URL = process.env.SUCCESS_URL; // URL do servidor Discord para redirecionar após sucesso
-const ERROR_URL = process.env.ERROR_URL || '/erro';
+const N8N_SHEETS_URL = process.env.N8N_SHEETS_URL;
+const SUCCESS_URL = process.env.SUCCESS_URL;
+const ERROR_URL = '/erro';
 
-// Rota principal — redireciona para autenticação Discord
+// Monta a redirect URI dinamicamente garantindo https://
+const getRedirectUri = (req) => {
+  const host = process.env.RAILWAY_PUBLIC_DOMAIN
+    || process.env.DISCORD_REDIRECT_URI?.replace('/callback', '')?.replace('https://', '')
+    || req.get('host');
+  return `https://${host.replace('https://', '')}/callback`;
+};
+
+// Rota principal
 app.get('/', (req, res) => {
+  const redirectUri = getRedirectUri(req);
+  console.log('Redirect URI:', redirectUri);
+
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: redirectUri,
     response_type: 'code',
     scope: 'identify guilds.join'
   });
-  res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params.toString()}`);
 });
 
 // Callback do Discord OAuth2
 app.get('/callback', async (req, res) => {
   const { code } = req.query;
+  const redirectUri = getRedirectUri(req);
 
-  if (!code) {
-    return res.redirect(ERROR_URL);
-  }
+  if (!code) return res.redirect(ERROR_URL);
 
   try {
-    // 1. Troca o code pelo token de acesso
     const tokenResponse = await axios.post(
       'https://discord.com/api/oauth2/token',
       new URLSearchParams({
@@ -39,14 +50,13 @@ app.get('/callback', async (req, res) => {
         client_secret: CLIENT_SECRET,
         grant_type: 'authorization_code',
         code,
-        redirect_uri: REDIRECT_URI
+        redirect_uri: redirectUri
       }),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
 
     const { access_token } = tokenResponse.data;
 
-    // 2. Busca dados do usuário Discord
     const userResponse = await axios.get('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${access_token}` }
     });
@@ -55,14 +65,12 @@ app.get('/callback', async (req, res) => {
     const discordUserId = discordUser.id;
     const discordUsername = discordUser.username;
 
-    // 3. Adiciona o usuário ao servidor (caso ainda não esteja)
     await axios.put(
       `https://discord.com/api/v10/guilds/${GUILD_ID}/members/${discordUserId}`,
       { access_token },
       { headers: { Authorization: `Bot ${BOT_TOKEN}`, 'Content-Type': 'application/json' } }
-    ).catch(() => {}); // ignora se já for membro
+    ).catch(() => {});
 
-    // 4. Consulta o N8N para buscar a compra pelo discord_user_id ou verifica no Sheets
     const sheetsResponse = await axios.post(N8N_SHEETS_URL, {
       discord_user_id: discordUserId,
       discord_username: discordUsername,
@@ -70,20 +78,18 @@ app.get('/callback', async (req, res) => {
     });
 
     if (sheetsResponse.status === 200) {
-      // Sucesso — redireciona para o servidor Discord
       return res.redirect(SUCCESS_URL);
     } else {
-      // Não encontrou compra — redireciona para verificação manual
       return res.redirect(`/verificar?user_id=${discordUserId}&username=${encodeURIComponent(discordUsername)}`);
     }
 
   } catch (error) {
-    console.error('Erro no OAuth2:', error.message);
+    console.error('Erro no OAuth2:', error.response?.data || error.message);
     return res.redirect(ERROR_URL);
   }
 });
 
-// Página de verificação manual (fallback)
+// Página de verificação manual
 app.get('/verificar', (req, res) => {
   const { user_id, username } = req.query;
   res.send(`
@@ -123,11 +129,8 @@ app.get('/verificar', (req, res) => {
   `);
 });
 
-// Processa verificação por email
-app.use(express.urlencoded({ extended: true }));
 app.post('/verificar-email', async (req, res) => {
   const { user_id, username, email } = req.body;
-
   try {
     const response = await axios.post(N8N_SHEETS_URL, {
       discord_user_id: user_id,
@@ -135,32 +138,10 @@ app.post('/verificar-email', async (req, res) => {
       email: email.toLowerCase(),
       action: 'verify_email'
     });
-
     if (response.status === 200) {
       return res.redirect(SUCCESS_URL);
     } else {
-      return res.send(`
-        <!DOCTYPE html>
-        <html lang="pt-BR">
-        <head>
-          <meta charset="UTF-8">
-          <title>Erro</title>
-          <style>
-            body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-            .card { background: #16213e; border-radius: 16px; padding: 40px; max-width: 440px; width: 90%; text-align: center; }
-            h2 { color: #f04747; margin-bottom: 16px; }
-            p { color: #b9bbbe; line-height: 1.6; }
-            a { color: #7289da; }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <h2>❌ Email não encontrado</h2>
-            <p>Não encontramos uma compra com esse email.<br><br>Verifique se digitou corretamente ou entre em contato com o <a href="#">suporte</a>.</p>
-          </div>
-        </body>
-        </html>
-      `);
+      return res.send(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Erro</title><style>body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#16213e;border-radius:16px;padding:40px;max-width:440px;width:90%;text-align:center}h2{color:#f04747;margin-bottom:16px}p{color:#b9bbbe;line-height:1.6}a{color:#7289da}</style></head><body><div class="card"><h2>❌ Email não encontrado</h2><p>Não encontramos uma compra com esse email.<br><br>Verifique se digitou corretamente ou entre em contato com o <a href="#">suporte</a>.</p></div></body></html>`);
     }
   } catch (error) {
     console.error('Erro na verificação:', error.message);
@@ -168,31 +149,12 @@ app.post('/verificar-email', async (req, res) => {
   }
 });
 
-// Página de erro
 app.get('/erro', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="pt-BR">
-    <head>
-      <meta charset="UTF-8">
-      <title>Erro</title>
-      <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #fff; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-        .card { background: #16213e; border-radius: 16px; padding: 40px; max-width: 440px; width: 90%; text-align: center; }
-        h2 { color: #f04747; margin-bottom: 16px; }
-        p { color: #b9bbbe; }
-        a { color: #7289da; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h2>❌ Algo deu errado</h2>
-        <p>Ocorreu um erro ao processar sua solicitação.<br><br>Tente novamente ou entre em contato com o <a href="#">suporte</a>.</p>
-      </div>
-    </body>
-    </html>
-  `);
+  res.send(`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Erro</title><style>body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#16213e;border-radius:16px;padding:40px;max-width:440px;width:90%;text-align:center}h2{color:#f04747;margin-bottom:16px}p{color:#b9bbbe}a{color:#7289da}</style></head><body><div class="card"><h2>❌ Algo deu errado</h2><p>Ocorreu um erro ao processar sua solicitação.<br><br>Tente novamente ou entre em contato com o <a href="#">suporte</a>.</p></div></body></html>`);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Servidor rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Servidor rodando na porta ${PORT}`);
+  console.log(`🔗 Redirect URI: https://${process.env.RAILWAY_PUBLIC_DOMAIN || 'localhost:' + PORT}/callback`);
+});
